@@ -395,6 +395,7 @@ class Mmdet3dNode(Node):
         self.declare_parameter('point_cloud_qos',   'best_effort')
         self.declare_parameter('target_frame',      'map')
         self.declare_parameter('vehicle_boxes_frame',        'map')
+        self.declare_parameter('vehicle_raw_cloud_frame',    'map')
         self.declare_parameter('vehicle_outlines',  'map')
         self.declare_parameter('match_distance_threshold', 3.0)     # 汽车一次走了多远内算同一辆车
         self.declare_parameter('max_missed_frames', 10)       # 连续多少帧都没检测到就说明车不在了  跟frames是有关系的
@@ -408,11 +409,6 @@ class Mmdet3dNode(Node):
         self.declare_parameter('penetration_confirm_frames_threshold', 2)    # 穿透连续多少帧认为才是真的消失了
         self.declare_parameter('jitter_threshold', 0.3)
         self.declare_parameter('jitter_stable_frames', 10)
-        # 机器人长宽高参数
-        self.declare_parameter('ego_exclusion_x', 1.5)
-        self.declare_parameter('ego_exclusion_y', 3.0)
-        self.declare_parameter('ego_exclusion_z', 2.0)        
-        
 
         # TRT engine 参数
         _default_engine = os.path.join(_pkg_dir, 'configs', 'pth', 'pointpillars_backbone_multilevel_fp16.engine')
@@ -427,6 +423,7 @@ class Mmdet3dNode(Node):
         pc_qos_str      = self.get_parameter('point_cloud_qos').value
         self.target_frame = self.get_parameter('target_frame').value
         self.vehicle_boxes_frame = self.get_parameter('vehicle_boxes_frame').value
+        self.vehicle_raw_cloud_frame = self.get_parameter('vehicle_raw_cloud_frame').value
         self.completed_cloud_map_frame = self.get_parameter('vehicle_outlines').value
         self.process_every_n_frames = self.get_parameter('process_every_n_frames').value
         self.match_threshold = self.get_parameter('match_distance_threshold').value
@@ -442,9 +439,7 @@ class Mmdet3dNode(Node):
         self.jitter_stable_frames = self.get_parameter('jitter_stable_frames').value
         engine_file = self.get_parameter('engine_file').value
         self._device = device
-        self.ego_exclusion_x = self.get_parameter('ego_exclusion_x').value
-        self.ego_exclusion_y = self.get_parameter('ego_exclusion_y').value
-        self.ego_exclusion_z = self.get_parameter('ego_exclusion_z').value
+
         # ---- 加载模型 ----
         self._tmp_config_file = None
         if not config_file:
@@ -572,8 +567,8 @@ class Mmdet3dNode(Node):
 
         self.completed_cloud_map_pub = self.create_publisher(
             PointCloud2, '/vehicle_outlines', 10)
-        self.ego_zone_pub = self.create_publisher(
-            MarkerArray, '/ego_exclusion_zone', 10)
+        self.vehicle_raw_cloud_pub = self.create_publisher(
+            PointCloud2, '/vehicle_raw_cloud', 10)
         self.vehicle_boxes_pub = self.create_publisher(
             MarkerArray, '/vehicle_boxes', 10)
 
@@ -1200,6 +1195,7 @@ class Mmdet3dNode(Node):
         matches, unmatched_dets, unmatched_static_ids = self._id_tracks(
             current_detections, self.static_tracks)
 
+        bbox_points_cache = {}
         tracks_to_delete = []
         matched_dynamic_ids = set()
 
@@ -1245,13 +1241,24 @@ class Mmdet3dNode(Node):
                         dyn_info['label'] = det['class_name']
                         dyn_info['local_center'] = det['local_center']
                         dyn_info['local_yaw'] = det['yaw_local']
-
+                        cx_l, cy_l, cz_l = det['local_center']
+                        l, w, h = det['model_bbox_size']
+                        y_l = det['yaw_local']
+                        if det_idx not in bbox_points_cache:
+                            bbox_points_cache[det_idx] = self._extract_bbox_points(
+                                pts, cx_l, cy_l, cz_l, l, w, h, y_l)
+                        dyn_info['bbox_points'] = bbox_points_cache[det_idx]
                         dyn_info['is_matched'] = True
                         matched_dynamic_ids.add(matched_dyn_id)
                     else:
                         new_dyn_id = self.next_dynamic_id
                         self.next_dynamic_id += 1
- 
+                        cx_l, cy_l, cz_l = det['local_center']
+                        l, w, h = det['model_bbox_size']
+                        y_l = det['yaw_local']
+                        if det_idx not in bbox_points_cache:
+                            bbox_points_cache[det_idx] = self._extract_bbox_points(
+                                pts, cx_l, cy_l, cz_l, l, w, h, y_l)
                         self.dynamic_tracks[new_dyn_id] = {
                             'center': det['center'],
                             'size': det['model_bbox_size'],
@@ -1259,6 +1266,7 @@ class Mmdet3dNode(Node):
                             'label': det['class_name'],
                             'local_center': det['local_center'],
                             'local_yaw': det['yaw_local'],
+                            'bbox_points': bbox_points_cache[det_idx],
                             'is_matched': True,
                         }
                         matched_dynamic_ids.add(new_dyn_id)
@@ -1287,7 +1295,13 @@ class Mmdet3dNode(Node):
                 dyn_info['label'] = det['class_name']
                 dyn_info['local_center'] = det['local_center']
                 dyn_info['local_yaw'] = det['yaw_local']
-
+                cx_l, cy_l, cz_l = det['local_center']
+                l, w, h = det['model_bbox_size']
+                y_l = det['yaw_local']
+                if det_idx not in bbox_points_cache:
+                    bbox_points_cache[det_idx] = self._extract_bbox_points(
+                        pts, cx_l, cy_l, cz_l, l, w, h, y_l)
+                dyn_info['bbox_points'] = bbox_points_cache[det_idx]
                 dyn_info['is_matched'] = True
                 matched_dynamic_ids.add(matched_dyn_id)
                 det['is_dynamic_matched'] = True
@@ -1404,6 +1418,7 @@ class Mmdet3dNode(Node):
 
         marker_array = MarkerArray()
         marker_id = 0
+        vehicle_raw_points_local = []
 
         _should_log_status = (time.time() - self._last_status_log_time >= 3.0)
         if _should_log_status:
@@ -1426,6 +1441,17 @@ class Mmdet3dNode(Node):
             base_center = track.first_center
             base_l, base_w, base_h = track.size
 
+            cx_local, cy_local, cz_local = det['local_center']
+            yaw_local = det.get('yaw_local', 0.0)
+            det_idx_viz = current_detections.index(det)
+            if det_idx_viz not in bbox_points_cache:
+                bbox_points_cache[det_idx_viz] = self._extract_bbox_points(
+                    pts, cx_local, cy_local, cz_local, model_l, model_w, model_h,
+                    yaw_local)
+            bbox_points_local = bbox_points_cache[det_idx_viz]
+
+            if len(bbox_points_local) > 0:
+                vehicle_raw_points_local.append(bbox_points_local)
 
             base_marker = self.create_box_marker(
                 center=base_center, size=(base_l, base_w, base_h),
@@ -1496,6 +1522,10 @@ class Mmdet3dNode(Node):
             center = dyn_info['center']
             size = dyn_info['size']
             yaw = dyn_info['yaw']
+            bbox_points = dyn_info['bbox_points']
+
+            if len(bbox_points) > 0:
+                vehicle_raw_points_local.append(bbox_points)
 
             dyn_marker = self.create_box_marker(
                 center=center, size=size, color=(1.0, 0.0, 0.0, 1.0),
@@ -1528,6 +1558,13 @@ class Mmdet3dNode(Node):
             map_header.frame_id = self.completed_cloud_map_frame
             self._publish_completed_cloud_map(combined_outlines, map_header)
 
+        if vehicle_raw_points_local:
+            combined_raw = np.vstack(vehicle_raw_points_local)
+            combined_raw_map = self.transform_pointcloud(combined_raw, R, t)
+            raw_header = Header()
+            raw_header.stamp = msg.header.stamp
+            raw_header.frame_id = self.vehicle_raw_cloud_frame
+            self._publish_vehicle_raw_cloud(combined_raw_map, raw_header)
 
         current_marker_ids = {(m.ns, m.id) for m in marker_array.markers}
         for ns, mid in self._last_marker_ids:
@@ -1540,7 +1577,7 @@ class Mmdet3dNode(Node):
                 del_marker.action = Marker.DELETE
                 marker_array.markers.append(del_marker)
         self._last_marker_ids = current_marker_ids
-        self._publish_ego_exclusion_zone(msg.header.stamp, source_frame)
+
         _t7 = time.perf_counter()
         with self._cached_marker_lock:
             self._cached_marker_array = marker_array
@@ -1561,56 +1598,7 @@ class Mmdet3dNode(Node):
                 f'static={len(self.static_tracks)} | '
                 f'dynamic={len(self.dynamic_tracks)} | '
                 f'backend={self._backend_name}')
-            
-    def _publish_ego_exclusion_zone(self, stamp, frame_id):
-        """自己的车的排除区域的长方体可视化"""
-        marker_array = MarkerArray()
 
-        # --- 半透明长方体 ---
-        cube = Marker()
-        cube.header.frame_id = frame_id
-        cube.header.stamp = stamp
-        cube.ns = "ego_exclusion_zone"
-        cube.id = 0
-        cube.type = Marker.CUBE
-        cube.action = Marker.ADD
-        cube.pose.position.x = 0.0
-        cube.pose.position.y = 0.0
-        # 长方体底部贴雷达平面，中心在 z=ego_exclusion_z/2 处向上生长
-        cube.pose.position.z = self.ego_exclusion_z / 2.0
-        cube.pose.orientation.w = 1.0
-        # lidar x=前后，y=左右
-        # x=左右半宽，y=前后半长
-        cube.scale.x = self.ego_exclusion_y * 2.0   # 前后总长
-        cube.scale.y = self.ego_exclusion_x * 2.0   # 左右总长
-        cube.scale.z = self.ego_exclusion_z         # 高度
-        cube.color.r = 1.0
-        cube.color.g = 1.0
-        cube.color.b = 0.0
-        cube.color.a = 0.25                        # 半透明黄
-        marker_array.markers.append(cube)
-
-        # --- RViz里显示当前参数值 ---
-        text = Marker()
-        text.header = cube.header
-        text.ns = "ego_exclusion_label"
-        text.id = 1
-        text.type = Marker.TEXT_VIEW_FACING
-        text.action = Marker.ADD
-        text.pose.position.x = 0.0
-        text.pose.position.y = 0.0
-        text.pose.position.z = self.ego_exclusion_z + 0.5
-        text.pose.orientation.w = 1.0
-        text.scale.z = 0.5
-        text.color.r = 1.0
-        text.color.g = 1.0
-        text.color.b = 0.0
-        text.color.a = 1.0
-        text.text = f"EGO x={self.ego_exclusion_x} y={self.ego_exclusion_y}"
-        marker_array.markers.append(text)
-
-        self.ego_zone_pub.publish(marker_array)
-        
     def _publish_cached_markers(self):
         with self._cached_marker_lock:
             if not self._cached_marker_array.markers or self._cached_timestamp is None:
@@ -1621,6 +1609,39 @@ class Mmdet3dNode(Node):
             marker.header.stamp = now_stamp
         self.vehicle_boxes_pub.publish(ma)
 
+    def _extract_bbox_points(self, pts, cx, cy, cz, l, w, h, yaw):
+        margin = 0.1
+        xyz = pts[:, :3]
+        cos_yaw = np.cos(yaw)
+        sin_yaw = np.sin(yaw)
+        half_l = l / 2.0
+        half_w = w / 2.0
+        half_z = h / 2.0
+        abs_cos = abs(cos_yaw)
+        abs_sin = abs(sin_yaw)
+        half_x = abs_cos * half_l + abs_sin * half_w
+        half_y = abs_sin * half_l + abs_cos * half_w
+        x_min, x_max = cx - half_x - margin, cx + half_x + margin
+        y_min, y_max = cy - half_y - margin, cy + half_y + margin
+        z_min, z_max = cz - half_z - margin, cz + half_z + margin
+        aabb_mask = (
+            (xyz[:, 0] >= x_min) & (xyz[:, 0] <= x_max) &
+            (xyz[:, 1] >= y_min) & (xyz[:, 1] <= y_max) &
+            (xyz[:, 2] >= z_min) & (xyz[:, 2] <= z_max))
+        cand_xyz = xyz[aabb_mask]
+        if cand_xyz.size == 0:
+            return cand_xyz
+        shifted = cand_xyz - np.array([cx, cy, cz], dtype=np.float32)
+        cos_r = cos_yaw
+        sin_r = -sin_yaw
+        local_x = shifted[:, 0] * cos_r - shifted[:, 1] * sin_r
+        local_y = shifted[:, 0] * sin_r + shifted[:, 1] * cos_r
+        local_z = shifted[:, 2]
+        obb_mask = (
+            (np.abs(local_x) <= half_l + margin) &
+            (np.abs(local_y) <= half_w + margin) &
+            (np.abs(local_z) <= half_z + margin))
+        return cand_xyz[obb_mask]
 
     def _transform_yaw_to_map(self, yaw_local, R):
         dir_local = np.array([
@@ -1663,6 +1684,29 @@ class Mmdet3dNode(Node):
         track._outline_key = key
         return result
 
+    def _publish_vehicle_raw_cloud(self, points, header):
+        if len(points) == 0:
+            return
+        intensity = np.full((len(points), 1), 999.0, dtype=np.float32)
+        points_with_intensity = np.hstack(
+            [points[:, :3].astype(np.float32), intensity])
+        msg = PointCloud2()
+        msg.header = header
+        msg.header.frame_id = self.vehicle_raw_cloud_frame
+        msg.height = 1
+        msg.width = len(points)
+        msg.fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        msg.is_bigendian = False
+        msg.point_step = 16
+        msg.row_step = msg.point_step * len(points)
+        msg.is_dense = True
+        msg.data = points_with_intensity.tobytes()
+        self.vehicle_raw_cloud_pub.publish(msg)
 
     def _publish_completed_cloud_map(self, points, header):
         if len(points) == 0:
