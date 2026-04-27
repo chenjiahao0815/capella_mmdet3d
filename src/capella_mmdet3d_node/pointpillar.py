@@ -390,7 +390,7 @@ class Mmdet3dNode(Node):
         self.declare_parameter('config_file',       _default_cfg)
         self.declare_parameter('checkpoint_file',   _demo_pth)
         self.declare_parameter('infer_device',      'cuda:0')
-        self.declare_parameter('score_threshold',   0.35)
+        self.declare_parameter('score_threshold',   0.3)
         self.declare_parameter('pointcloud_topic',  '/vanjee/lidar')
         self.declare_parameter('point_cloud_qos',   'best_effort')
         self.declare_parameter('target_frame',      'map')
@@ -409,9 +409,9 @@ class Mmdet3dNode(Node):
         self.declare_parameter('jitter_threshold', 0.3)
         self.declare_parameter('jitter_stable_frames', 10)
         # 机器人长宽高参数
-        self.declare_parameter('ego_exclusion_x', 1.5)
-        self.declare_parameter('ego_exclusion_y', 3.0)
-        self.declare_parameter('ego_exclusion_z', 2.0)        
+        self.declare_parameter('ego_exclusion_x', 1.2)
+        self.declare_parameter('ego_exclusion_y', 2.0)
+        self.declare_parameter('ego_exclusion_z', 1.8)        
         
 
         # TRT engine 参数
